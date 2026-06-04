@@ -1,0 +1,3 @@
+* Install from https://www.sofa-framework.org/download/
+* (Linux): navigate to ~/[SOFA-INSTALL-FOLDER]/v25.12.00/bin
+* Run as ./runSofa-25.12.00 -l SofaPython3 /path/to/script.py
