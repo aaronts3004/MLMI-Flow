@@ -1,11 +1,8 @@
 import h5py
 import numpy as np
-from generate_primitives import PrimitivesGenerator
-
-import h5py
-from pathlib import Path
-
-from generate_primitives import PrimitivesGenerator
+from src.utils.paths import GENERATED
+from scripts.generate_primitives import PrimitivesGenerator
+import os
 
 # --------------------------------------------
 
@@ -14,13 +11,7 @@ W = 256
 T = 100                 # num time-steps per trajectory
 
 NUM_TRAJECTORIES = 100  # total num trajectories
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = PROJECT_ROOT / "data"
-GENERATED_DIR = DATA_DIR / "generated"
-GENERATED_DIR.mkdir(exist_ok=True)
-OUTFILE = GENERATED_DIR / f"rigid_dataset_isolated_primitives_{NUM_TRAJECTORIES}_trajectories.h5"
+OUTFILE = GENERATED / f"rigid_dataset_isolated_primitives_{NUM_TRAJECTORIES}_trajectories.h5"
 
 # --------------------------------------------
 
