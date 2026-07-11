@@ -30,6 +30,17 @@ class PrimitivesGenerator:
         y = np.random.uniform(margin, self.H - margin)
 
         return x, y
+    
+    def trajectory_in_bounds(self, pose, margin=20):
+        x = pose[:, 0]
+        y = pose[:, 1]
+
+        return (
+            x.min() >= margin and
+            x.max() <= self.W - margin and
+            y.min() >= margin and
+            y.max() <= self.H - margin
+        )
 
     # --------------------------------------------------
     # Primitive 1
@@ -37,30 +48,33 @@ class PrimitivesGenerator:
 
     def generate_line(self, T):
 
-        print("Generating Line Primitive")
+        margin = 20
 
-        pose = np.zeros((T,3), dtype=np.float32)
+        while True:
 
-        angle = np.random.uniform(0,2*np.pi)
-        speed = np.random.uniform(1,3)
+            angle = np.random.uniform(0, 2 * np.pi)
 
-        print("Angle: ", angle)
-        print("Speed: ", speed) 
+            path_length = np.random.uniform(40, 180)
 
-        dx = speed*np.cos(angle)
-        dy = speed*np.sin(angle)
+            x0, y0 = self.random_position(margin=margin)
 
-        print("dx: ", dx)
-        print("dy: ", dy)
+            x1 = x0 + path_length * np.cos(angle)
+            y1 = y0 + path_length * np.sin(angle)
 
-        x,y = self.random_position()
+            # accept only valid trajectories
+            if (
+                margin <= x1 <= self.W - margin and
+                margin <= y1 <= self.H - margin
+            ):
+                break
 
-        theta = angle
-        
-        for t in range(T):
-            pose[t] = [x,y,theta]
-            x += dx
-            y += dy
+        pose = np.zeros((T, 3), dtype=np.float32)
+
+        alpha = np.linspace(0, 1, T)
+
+        pose[:, 0] = x0 + alpha * (x1 - x0)
+        pose[:, 1] = y0 + alpha * (y1 - y0)
+        pose[:, 2] = angle
 
         return pose
 
@@ -68,16 +82,31 @@ class PrimitivesGenerator:
     # Primitive 2
     # --------------------------------------------------
 
+    def random_circle_center(self, radius, margin=20):
+
+        cx = np.random.uniform(
+            radius + margin,
+            self.W - radius - margin,
+        )
+
+        cy = np.random.uniform(
+            radius + margin,
+            self.H - radius - margin,
+        )
+
+        return cx, cy
+
     def generate_circle(self,T):
 
         pose = np.zeros((T,3),dtype=np.float32)
-        radius = np.random.uniform(60, 90)
+        radius = np.random.uniform(25, 90)
 
-        cx = np.random.uniform(radius+20,self.W-radius-20)
-        cy = np.random.uniform(radius+20,self.H-radius-20)
+        cx, cy = self.random_circle_center(radius)
 
         direction = np.random.choice([-1,1])
-        omega = direction*np.random.uniform(0.03,0.08)
+        num_turns = np.random.uniform(0.5, 2.0)
+
+        omega = direction * (2 * np.pi * num_turns) / (T - 1)
         angle = np.random.uniform(0,2*np.pi)
 
         for t in range(T):
@@ -101,10 +130,9 @@ class PrimitivesGenerator:
 
         pose = np.zeros((T,3),dtype=np.float32)
 
-        radius = np.random.uniform(60, 90)
+        radius = np.random.uniform(25, 90)
 
-        cx = np.random.uniform(radius+20,self.W-radius-20)
-        cy = np.random.uniform(radius+20,self.H-radius-20)
+        cx, cy = self.random_circle_center(radius)
 
         direction = np.random.choice([-1,1])
 
@@ -131,119 +159,186 @@ class PrimitivesGenerator:
     # Primitive 4
     # --------------------------------------------------
 
-    def generate_rectangle(self,T):
+    def generate_rectangle(self, T):
 
-        pose = np.zeros((T,3),dtype=np.float32)
+        margin = 20
 
-        w = np.random.uniform(80, 160)
-        h = np.random.uniform(80, 160)
+        while True:
 
-        x0 = np.random.uniform(40,self.W-w-40)
-        y0 = np.random.uniform(40,self.H-h-40)
+            pose = np.zeros((T, 3), dtype=np.float32)
 
-        corners = np.array([
-            [x0,y0],
-            [x0+w,y0],
-            [x0+w,y0+h],
-            [x0,y0+h],
-            [x0,y0]
-        ])
+            width = np.random.uniform(50, 150)
+            height = np.random.uniform(50, 150)
 
-        pts = T//4
+            center_x, center_y = self.random_position(margin=margin + max(width, height) / 2)
 
-        idx = 0
+            angle = np.random.uniform(0, 2 * np.pi)
 
-        for edge in range(4):
+            direction = np.random.choice([-1, 1])
 
-            p0 = corners[edge]
-            p1 = corners[edge+1]
+            start_corner = np.random.randint(4)
 
-            theta = np.arctan2(
-                p1[1]-p0[1],
-                p1[0]-p0[0]
-            )
+            # rectangle in local coordinates
+            corners = np.array([
+                [-width / 2, -height / 2],
+                [ width / 2, -height / 2],
+                [ width / 2,  height / 2],
+                [-width / 2,  height / 2],
+            ])
 
-            for i in range(pts):
+            # rotate rectangle
+            R = np.array([
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle),  np.cos(angle)],
+            ])
 
-                alpha = i/pts
+            corners = corners @ R.T
+            corners += np.array([center_x, center_y])
 
-                p = (1-alpha)*p0 + alpha*p1
+            # choose traversal direction
+            if direction == -1:
+                corners = corners[::-1]
 
-                pose[idx] = [p[0],p[1],theta]
+            # random starting corner
+            corners = np.roll(corners, -start_corner, axis=0)
 
-                idx += 1
+            # close loop
+            corners = np.vstack([corners, corners[0]])
 
-        pose[idx:] = pose[idx-1]
+            pts_per_edge = T // 4
 
-        return pose
+            idx = 0
 
+            for edge in range(4):
+
+                p0 = corners[edge]
+                p1 = corners[edge + 1]
+
+                theta = np.arctan2(
+                    p1[1] - p0[1],
+                    p1[0] - p0[0],
+                )
+
+                for i in range(pts_per_edge):
+
+                    alpha = i / pts_per_edge
+
+                    p = (1 - alpha) * p0 + alpha * p1
+
+                    pose[idx] = [p[0], p[1], theta]
+
+                    idx += 1
+
+            pose[idx:] = pose[idx - 1]
+
+            if self.trajectory_in_bounds(pose):
+                return pose
     # --------------------------------------------------
     # Primitive 5
     # --------------------------------------------------
 
-    def generate_zigzag(self,T):
+    def generate_zigzag(self, T):
 
-        pose = np.zeros((T,3),dtype=np.float32)
+        margin = 20
 
-        x,y = self.random_position()
+        while True:
 
-        theta = np.pi/4
+            pose = np.zeros((T, 3), dtype=np.float32)
 
-        speed = 2
+            x, y = self.random_position(margin=margin)
 
-        segment = 20
+            base_angle = np.random.uniform(0, 2 * np.pi)
 
-        for t in range(T):
+            deviation = np.random.uniform(np.pi / 8, np.pi / 3)
 
-            pose[t] = [x,y,theta]
+            speed = np.random.uniform(1.0, 3.0)
 
-            x += speed*np.cos(theta)
-            y += speed*np.sin(theta)
+            segment = np.random.randint(8, 20)
 
-            if (t+1)%segment==0:
+            theta = base_angle + deviation
 
-                theta *= -1
+            sign = 1
 
-        return pose
+            for t in range(T):
+
+                pose[t] = [x, y, theta]
+
+                x += speed * np.cos(theta)
+                y += speed * np.sin(theta)
+
+                if (t + 1) % segment == 0:
+
+                    sign *= -1
+
+                    theta = base_angle + sign * deviation
+
+            if self.trajectory_in_bounds(pose):
+                return pose
 
     # --------------------------------------------------
     # Primitive 6
     # --------------------------------------------------
 
-    def generate_figure8(self,T):
+    def generate_figure8(self, T):
 
-        pose = np.zeros((T,3),dtype=np.float32)
+        margin = 20
 
-        cx = self.W/2
-        cy = self.H/2
+        while True:
 
-        a = np.random.uniform(70, 100)
+            pose = np.zeros((T, 3), dtype=np.float32)
 
-        ts = np.linspace(0,2*np.pi,T)
+            # Size of the figure-8
+            a = np.random.uniform(30, 70)
 
-        for i,t in enumerate(ts):
+            # Random center (large enough so the entire curve fits)
+            cx = np.random.uniform(
+                margin + a,
+                self.W - margin - a,
+            )
 
-            x = cx + a*np.sin(t)
-            y = cy + a*np.sin(t)*np.cos(t)
+            cy = np.random.uniform(
+                margin + a / 2,
+                self.H - margin - a / 2,
+            )
 
-            if i<T-1:
+            # Random global orientation
+            rotation = np.random.uniform(0, 2 * np.pi)
 
-                dt = ts[i+1]-t
+            ts = np.linspace(0, 2 * np.pi, T)
 
-                dx = a*np.cos(t)
+            R = np.array([
+                [np.cos(rotation), -np.sin(rotation)],
+                [np.sin(rotation),  np.cos(rotation)],
+            ])
 
-                dy = a*(np.cos(t)**2 - np.sin(t)**2)
+            for i, t in enumerate(ts):
 
-                theta = np.arctan2(dy,dx)
+                # Local figure-8 (lemniscate-like)
+                p = np.array([
+                    a * np.sin(t),
+                    a * np.sin(t) * np.cos(t),
+                ])
 
-            else:
+                # Rotate
+                p = R @ p
 
-                theta = pose[i-1,2]
+                x = cx + p[0]
+                y = cy + p[1]
 
-            pose[i] = [x,y,theta]
+                # Tangent in local coordinates
+                dp = np.array([
+                    a * np.cos(t),
+                    a * (np.cos(t)**2 - np.sin(t)**2),
+                ])
 
-        return pose
+                dp = R @ dp
 
+                theta = np.arctan2(dp[1], dp[0])
+
+                pose[i] = [x, y, theta]
+
+            if self.trajectory_in_bounds(pose):
+                return pose
     # --------------------------------------------------
 
     def generate_random(self,T):

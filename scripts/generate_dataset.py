@@ -34,17 +34,24 @@ with h5py.File(OUTFILE,"w") as f:
     f.attrs["num_trajectories"] = NUM_TRAJECTORIES
     f.attrs["steps_per_traj"] = T
 
+    print(f"Generating {NUM_TRAJECTORIES} per primitive with {T} timesteps per trajectory")
+
     for primitive_name, primitive_fn in primitives:
 
-        pose = primitive_fn(T)                    # ground-truth pose trajectory
-        action = generator.compute_action(pose)   # delta_pose for all timesteps
+        primitive_group = f.create_group(primitive_name)
 
-        group = f.create_group(primitive_name)
+        for traj_idx in range(NUM_TRAJECTORIES):
 
-        group.create_dataset("pose", data=pose)
-        group.create_dataset("action", data=action)
+            pose = primitive_fn(T)
+            action = generator.compute_action(pose)
 
-        group.attrs["primitive"] = primitive_name
-        group.attrs["length"] = T
+            traj_group = primitive_group.create_group(
+                f"trajectory_{traj_idx:04d}"
+            )
 
-print("Dataset written.")
+            traj_group.create_dataset("pose", data=pose)
+            traj_group.create_dataset("action", data=action)
+
+            traj_group.attrs["length"] = T
+
+print("Dataset written to OUTFILE=", OUTFILE)

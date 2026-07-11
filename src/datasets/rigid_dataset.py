@@ -5,23 +5,26 @@ import numpy as np
 
 class RigidDataset(Dataset):
 
-    def __init__(self, path, trajectories=None):
+    def __init__(self, path, train_objective, trajectories=None,):
 
         self.file = h5py.File(path, "r")
 
         self.trajectories = []
-        names = trajectories
+        primitive_names = trajectories
 
-        if names is None:
-            names = list(self.file.keys())
+        if primitive_names is None:
+            primitive_names = list(self.file.keys())
 
-        for name in names:
-            group = self.file[name]
-            self.trajectories.append({
-                "name": name,
-                "pose": group["pose"][:],
-                "action": group["action"][:],
-            })
+        for primitive_name in primitive_names:
+            primitive_group = self.file[primitive_name]
+            for traj_name in primitive_group.keys():
+                traj_group = primitive_group[traj_name]
+                self.trajectories.append({
+                    "primitive": primitive_name,
+                    "name": traj_name,
+                    "pose": traj_group["pose"][:],
+                    "action": traj_group["action"][:],
+                })
 
         self.transitions = []
         for traj_idx, traj in enumerate(self.trajectories):
@@ -34,56 +37,88 @@ class RigidDataset(Dataset):
         self.width=self.file.attrs["image_width"]
         self.height=self.file.attrs["image_height"]
 
-        self.active_trajectory_indices = names
-
+        
+        self.train_objective = train_objective
+        self.trajectory_indices = list(range(len(self.trajectories)))  # index into self.trajectories
+        self.active_trajectory_indices = self.trajectory_indices.copy()
 
     def __len__(self):
-        return len(self.transitions)
+        if self.train_objective == "autoregressive":
+            return len(self.transitions)
+        elif self.train_objective == "flow_matching":
+            return len(self.trajectory_indices)
 
     def __getitem__(self, idx):
 
-        traj_idx, frame_idx = self.transitions[idx]
-        traj = self.trajectories[traj_idx]
+        if self.train_objective == "autoregressive": 
 
-        pose = traj["pose"][frame_idx]
-        next_pose = traj["pose"][frame_idx+1]
+            traj_idx, frame_idx = self.transitions[idx]
+            traj = self.trajectories[traj_idx]
 
-        action = traj["action"][frame_idx]
+            pose = traj["pose"][frame_idx]
+            next_pose = traj["pose"][frame_idx+1]
 
-        norm_pose = self.normalize_pose(pose)
-        norm_next_pose = self.normalize_pose(next_pose)
-       
-        delta_pose = norm_next_pose - norm_pose
+            action = traj["action"][frame_idx]
 
-        T = len(traj["pose"])
-        trajectory_t = frame_idx  / (T-1)
+            norm_pose = self.normalize_pose(pose)
+            norm_next_pose = self.normalize_pose(next_pose)
+        
+            delta_pose = norm_next_pose - norm_pose
 
-        return {
-            "pose": torch.from_numpy(norm_pose).float(),
-            "next_pose": torch.from_numpy(norm_next_pose).float(),
-            "pose_raw": torch.from_numpy(pose).float(),
-            "next_pose_raw": torch.from_numpy(next_pose).float(),
+            T = len(traj["pose"])
+            trajectory_t = frame_idx  / (T-1)
 
-            "start_pose": self.normalize_pose(traj["pose"][0]),
-            "goal_pose": self.normalize_pose(traj["pose"][-1]),
+            return {
+                "pose": torch.from_numpy(norm_pose).float(),
+                "next_pose": torch.from_numpy(norm_next_pose).float(),
+                "pose_raw": torch.from_numpy(pose).float(),
+                "next_pose_raw": torch.from_numpy(next_pose).float(),
 
-            "frame_idx": frame_idx,
-            "trajectory_length": T,
-            "trajectory_t": torch.tensor([trajectory_t], dtype=torch.float32),
+                "start_pose": torch.from_numpy(self.normalize_pose(traj["pose"][0])).float(),
+                "goal_pose": torch.from_numpy(self.normalize_pose(traj["pose"][-1])).float(),
 
-            "delta_pose": torch.from_numpy(delta_pose).float(),
-            "action": torch.from_numpy(action),
+                "frame_idx": frame_idx,
+                "trajectory_length": T,
+                "trajectory_t": torch.tensor([trajectory_t], dtype=torch.float32),
 
-            "trajectory": traj["name"]
-        }
-    
+                "delta_pose": torch.from_numpy(delta_pose).float(),
+                "action": torch.from_numpy(action),
+
+                "trajectory": traj["name"]
+            }
+        elif self.train_objective == "flow_matching": 
+            traj_idx = self.trajectory_indices[idx]
+            return self.get_trajectory(traj_idx)
+        else: 
+            print("Unknown training objective")
+            raise RuntimeError
+        
     def get_trajectory(self, idx):
         traj = self.trajectories[idx]
         return {
+
+            "trajectory": torch.from_numpy(
+                self.normalize_pose(traj["pose"])
+            ).float(),
+
+            "trajectory_raw": torch.from_numpy(
+                traj["pose"]
+            ).float(),
+
+            "start_pose": torch.from_numpy(
+                self.normalize_pose(traj["pose"][0])
+            ).float(),
+
+            "goal_pose": torch.from_numpy(
+                self.normalize_pose(traj["pose"][-1])
+            ).float(),
+
+            "action": torch.from_numpy(
+                traj["action"]
+            ).float(),
+
+            "primitive": traj["primitive"],
             "name": traj["name"],
-            "pose": self.normalize_pose(traj["pose"]),
-            "pose_raw": traj["pose"],
-            "action": traj["action"],
         }
     
     def set_active_primitives(self, trajectories=None):
@@ -93,12 +128,12 @@ class RigidDataset(Dataset):
         elif isinstance(trajectories, str):
             active = [
                 i for i, traj in enumerate(self.trajectories)
-                if traj["name"] == trajectories
+                if traj["primitive"] == trajectories
             ]
         else:
             active = [
                 i for i, traj in enumerate(self.trajectories)
-                if traj["name"] in trajectories
+                if traj["primitive"] in trajectories
             ]
 
         self.transitions = []
@@ -109,7 +144,18 @@ class RigidDataset(Dataset):
                     (traj_idx, frame)
                 )
 
-        self.active_trajectory_indices = active
+        self.trajectory_indices = list(active)
+        self.active_trajectory_indices = list(active)
+
+
+    def set_active_trajectory(self, idx):
+        self.trajectory_indices = [idx]
+        self.transitions = []
+        T = len(self.trajectories[idx]["pose"])
+        for frame in range(T-1):
+            self.transitions.append((idx, frame))
+
+        self.active_trajectory_indices = [idx]
     
     @property
     def num_trajectories(self):
@@ -117,7 +163,10 @@ class RigidDataset(Dataset):
     
     @property
     def trajectory_names(self):
-        return [t["name"] for t in self.trajectories]
+        return [
+            f'{t["primitive"]}/{t["name"]}'
+            for t in self.trajectories
+        ]
     
     def normalize_pose(self, pose, width=None, height=None):
         w = self.width if width is None else width
