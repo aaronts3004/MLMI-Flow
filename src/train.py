@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.datasets.rigid_dataset import RigidDataset
-from src.models.mlp import PoseMLP
+from src.models.mlp import PoseMLP, TrajectoryMLP
 from src.training.trainer import train
 from src.eval import evaluate
 
@@ -13,13 +13,25 @@ from src.eval import evaluate
 # Configuration
 # ==========================================================
 
-NUM_EPOCHS = 100
-BATCH_SIZE = 8
+NUM_EPOCHS = 1000
 LEARNING_RATE = 5e-4
 
 HDF5_PATH = "data/generated/rigid_dataset_isolated_primitives_100_trajectories.h5"
-MODEL_NAME = "mlp"
-OUTPUT_DIR = f"outputs/overfit/{MODEL_NAME}"
+OBJECTIVE = "flow_matching"    # can be "autoregressive", "flow_matching"
+
+if OBJECTIVE == "flow_matching": 
+    MODEL_NAME = "traj_mlp"
+    model_constructor = TrajectoryMLP
+    BATCH_SIZE = 8
+elif OBJECTIVE == "autoregressive": 
+    MODEL_NAME = "pose_mlp"
+    model_constructor = PoseMLP
+    BATCH_SIZE = 1
+else: 
+    print("Unknown Training Objective !")
+    raise ValueError
+
+OUTPUT_DIR = f"outputs/overfit/{MODEL_NAME}/{OBJECTIVE}"
 SAVE_CKPT = False
 
 PRIMITIVES = [
@@ -40,21 +52,20 @@ def main():
     print("\nDevice:", device)
     print("\n\nLoading Dataset...")
 
-    dataset = RigidDataset(HDF5_PATH)
-
-    print("Primitive types:", dataset.trajectory_names)
-    print("len(dataset)=:", len(dataset))
+    dataset = RigidDataset(HDF5_PATH, OBJECTIVE)
     print()
 
     for primitive in PRIMITIVES:
         print(f"\nTraining on primitive: {primitive}")
         dataset.set_active_primitives(primitive)
+        
+        if OBJECTIVE == "autoregressive": 
+            dataset.set_active_trajectory(10)            # try to overfit the PoseMLP to a single trajectory
 
-        print("Samples:", len(dataset))
+        print("Samples for this primitive (num_trajectories):", len(dataset))
 
         train_loader = DataLoader(dataset,batch_size=BATCH_SIZE,shuffle=True)
-
-        model = PoseMLP()       # re-instantiate model for every primitive
+        model = model_constructor()       # re-instantiate model for every primitive
 
         optimizer = torch.optim.Adam(model.parameters(),lr=LEARNING_RATE)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer,step_size=200,gamma=0.5)
@@ -62,6 +73,7 @@ def main():
 
         losses = train(
             model=model,
+            objective=OBJECTIVE,
             train_loader=train_loader,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -75,11 +87,15 @@ def main():
             torch.save(model.state_dict(), save_path)
             print(f"Saved model to {save_path}")
 
-        evaluate(
-            model=model,
-            dataset=dataset,
-            output_dir=OUTPUT_DIR,
-        )
+        try: 
+            evaluate(
+                model=model,
+                objective=OBJECTIVE,
+                dataset=dataset,
+                output_dir=OUTPUT_DIR,
+            )
+        except: 
+            print("evaluation failed")
 
         print()
 

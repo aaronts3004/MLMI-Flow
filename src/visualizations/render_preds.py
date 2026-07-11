@@ -169,10 +169,10 @@ def render_rollout(predicted, gt, output_dir, filename):
         (800,800),
     )
 
-    for t in range(len(gt)):
+    for t in range(len(predicted)):
         img = render(
             pose=predicted[t],
-            gt_pose=gt[t],
+            gt_pose=gt[t] if gt != None else None,
             polygon=tool_polygon,
         )
         writer.write(img)
