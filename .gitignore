@@ -9,3 +9,4 @@ venv/
 *.h5
 *.mp4
 outputs/
+*.DS_Store

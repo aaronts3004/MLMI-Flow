@@ -25,7 +25,7 @@ You can inspect the dataset a bit with `python -m scripts.inspect_dataset`
 ### Run Train Script 
 After generating the dataset, you can launch a training with  
 ```bash 
-python -m scripts.train
+python -m src.train
 ```
 This script handles the training parameters and orchestration. The loop over epochs and batches etc. happens in `trainer.py`  
 At the top of `train.py` you can choose the `TRAINING_OBJECTIVE` - can be either "autoregressive" or "flow_matching"   
