@@ -35,7 +35,6 @@ OUTPUT_DIR = DATA_ROOT / "flow_analysis_output"
 MASKS_DIR  = args.masks_root if args.masks_root is not None else DATA_ROOT / "masks"
 
 
-MASKS_DIR   = DATA_ROOT / "masks"
 MASK_EXTS   = (".png", ".jpg", ".jpeg", ".npy", ".npz")
 MASK_NPZ_KEY = "mask"   # key to read if a mask file is a .npz archive
 
