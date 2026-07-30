@@ -12,9 +12,27 @@ import torch.nn.functional as F
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
 
-DATA_ROOT = Path(<define path>)
-VIDEOS_DIR  = DATA_ROOT / "videos"
-OUTPUT_DIR  = DATA_ROOT / "flow_analysis_output"
+import argparse
+from pathlib import Path
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Flow analysis pipeline")
+    parser.add_argument(
+        "--data-root", type=Path, required=True,
+        help="Root directory containing videos and outputs"
+    )
+    parser.add_argument(
+        "--masks-root", type=Path, default=None,
+        help="Root directory containing precomputed masks (defaults to DATA_ROOT/masks if not set)"
+    )
+    return parser.parse_args()
+
+args = parse_args()
+
+DATA_ROOT  = args.data_root
+VIDEOS_DIR = DATA_ROOT / "videos"
+OUTPUT_DIR = DATA_ROOT / "flow_analysis_output"
+MASKS_DIR  = args.masks_root if args.masks_root is not None else DATA_ROOT / "masks"
 
 
 MASKS_DIR   = DATA_ROOT / "masks"
