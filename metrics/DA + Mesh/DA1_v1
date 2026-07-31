@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (  # noqa: E402
+    list_frames, load_rgb, load_intrinsics, region_block_size,
+)
+
+def run_vda(frames: list[np.ndarray], checkpoint: str, encoder: str, device: str) -> np.ndarray:
+    """Video Depth Anything (temporally consistent — preferred).
+
+    Requires: git clone https://github.com/DepthAnything/Video-Depth-Anything
+    on PYTHONPATH + a checkpoint (e.g. video_depth_anything_vitl.pth).
+    """
+    try:
+        import torch
+        from video_depth_anything.video_depth import VideoDepthAnything
+    except ImportError as e:
+        raise SystemExit(
+            f"[depth] Video Depth Anything not importable ({e}).\n"
+            "  git clone https://github.com/DepthAnything/Video-Depth-Anything\n"
+            "  pip install -r Video-Depth-Anything/requirements.txt\n"
+            "  export PYTHONPATH=$PYTHONPATH:/path/to/Video-Depth-Anything\n"
+            "  download checkpoint from the repo's README\n"
+            "or fall back to --backend da2."
+        )
+    model_cfg = {
+        "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
+        "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+    }[encoder]
+    model = VideoDepthAnything(**model_cfg)
+    model.load_state_dict(torch.load(checkpoint, map_location="cpu"), strict=True)
+    model = model.to(device).eval()
+    video = np.stack(frames)  # (T,H,W,3) RGB uint8
+    with torch.no_grad():
+        disp, _fps = model.infer_video_depth(video, target_fps=-1, input_size=518, device=device)
+    return np.asarray(disp, dtype=np.float32)
+
+
+def run_da2(frames: list[np.ndarray], device: str) -> np.ndarray:
+    """Depth Anything V2 per-frame (fallback) + temporal median (window 3)."""
+    try:
+        from transformers import pipeline as hf_pipeline
+        from PIL import Image
+    except ImportError as e:
+        raise SystemExit(
+            f"[depth] transformers/PIL not importable ({e}). "
+            "pip install transformers pillow torch"
+        )
+    pipe = hf_pipeline(
+        "depth-estimation",
+        model="depth-anything/Depth-Anything-V2-Small-hf",
+        device=0 if device == "cuda" else -1,
+    )
+    h, w = frames[0].shape[:2]
+    disp = []
+    for i, fr in enumerate(frames):
+        out = pipe(Image.fromarray(fr))
+        d = np.asarray(out["predicted_depth"], dtype=np.float32)
+        if d.shape != (h, w):
+            d = cv2.resize(d, (w, h), interpolation=cv2.INTER_LINEAR)
+        disp.append(d)
+        print(f"[depth] da2 frame {i + 1}/{len(frames)}", flush=True)
+    disp = np.stack(disp)
+    if len(disp) >= 3:  # mild anti-flicker for per-frame model
+        pad = np.concatenate([disp[:1], disp, disp[-1:]])
+        disp = np.median(np.stack([pad[:-2], pad[1:-1], pad[2:]]), axis=0)
+        print("[depth] applied temporal median filter (window 3) — per-frame "
+              "model is not temporally consistent; prefer --backend vda.")
+    return disp
+
+def run_precomputed(frames: list[np.ndarray], disparity_dir: str) -> np.ndarray:
+    files = sorted(
+        f for f in os.listdir(disparity_dir) if f.endswith(".npy")
+    )
+    if len(files) != len(frames):
+        raise SystemExit(
+            f"[depth] {disparity_dir} has {len(files)} .npy files, clip has {len(frames)} frames"
+        )
+    h, w = frames[0].shape[:2]
+    disp = []
+    for f in files:
+        d = np.load(os.path.join(disparity_dir, f)).astype(np.float32)
+        if d.shape != (h, w):
+            d = cv2.resize(d, (w, h), interpolation=cv2.INTER_LINEAR)
+        disp.append(d)
+    return np.stack(disp)
+
+
+def disparity_to_pixel_depth(
+    disp: np.ndarray, fx: float, znear_f: float, zfar_f: float
+) -> tuple[np.ndarray, dict]:
+    """One global affine normalization for the whole clip, then map linearly in
+    inverse depth onto [znear_f*fx, zfar_f*fx] (pixel units)."""
+    lo, hi = np.percentile(disp, [2.0, 98.0])
+    if hi - lo < 1e-9:
+        raise SystemExit("[depth] disparity is (near-)constant — model output looks broken")
+    d_norm = np.clip((disp - lo) / (hi - lo), 0.0, 1.0)
+    z_near, z_far = znear_f * fx, zfar_f * fx
+    inv_z = d_norm * (1.0 / z_near) + (1.0 - d_norm) * (1.0 / z_far)
+    depth = (1.0 / inv_z).astype(np.float32)
+    meta = {
+        "disp_p2": float(lo), "disp_p98": float(hi),
+        "z_near_px": z_near, "z_far_px": z_far,
+        "normalization": "global-clip affine on disparity, linear in inverse depth",
+    }
+    return depth, meta
+
+def region_depth(depth: np.ndarray, block: int) -> np.ndarray:
+    h, w = depth.shape
+    hb, wb = h // block, w // block
+    trimmed = depth[: hb * block, : wb * block]
+    return trimmed.reshape(hb, block, wb, block).mean(axis=(1, 3)).astype(np.float32)
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("clip_dir", help="folder with frame_000.png ... frame_NNN.png")
+    ap.add_argument("--backend", choices=["vda", "da2", "precomputed"], default="vda")
+    ap.add_argument("--checkpoint", default=None, help="VDA checkpoint .pth")
+    ap.add_argument("--encoder", choices=["vits", "vitl"], default="vitl")
+    ap.add_argument("--disparity-dir", default=None, help="for --backend precomputed")
+    ap.add_argument("--intrinsics", default=None, help="json {fx,fy,cx,cy}; else assumed")
+    ap.add_argument("--out", default=None, help="output dir (default CLIP_DIR/depth)")
+    ap.add_argument("--device", default=None, help="cuda|cpu (auto if omitted)")
+    ap.add_argument("--znear", type=float, default=0.5, help="near depth as multiple of fx")
+    ap.add_argument("--zfar", type=float, default=2.0, help="far depth as multiple of fx")
+    ap.add_argument("--max-frames", type=int, default=20)
+    args = ap.parse_args()
+
+    device = args.device
+    if device is None:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+
+    frame_paths = list_frames(args.clip_dir)[: args.max_frames]
+    frames = [load_rgb(p) for p in frame_paths]
+    h, w = frames[0].shape[:2]
+    intr, intr_note = load_intrinsics(args.intrinsics, w, h)
+    print(f"[depth] {len(frames)} frames of {w}x{h}; intrinsics: {intr_note}")
+
+    if args.backend == "vda":
+        if not args.checkpoint:
+            raise SystemExit("[depth] --backend vda requires --checkpoint")
+        disp = run_vda(frames, args.checkpoint, args.encoder, device)
+        model_info = f"Video-Depth-Anything ({args.encoder}), temporally consistent"
+    elif args.backend == "da2":
+        disp = run_da2(frames, device)
+        model_info = "Depth-Anything-V2-Small (per-frame) + temporal median(3)"
+    else:
+        if not args.disparity_dir:
+            raise SystemExit("[depth] --backend precomputed requires --disparity-dir")
+        disp = run_precomputed(frames, args.disparity_dir)
+        model_info = f"precomputed disparity from {args.disparity_dir}"
+
+    if disp.shape[1:] != (h, w):
+        disp = np.stack([cv2.resize(d, (w, h)) for d in disp])
+
+    depth, norm_meta = disparity_to_pixel_depth(disp, intr.fx, args.znear, args.zfar)
+
+    out_dir = args.out or os.path.join(args.clip_dir, "depth")
+    os.makedirs(out_dir, exist_ok=True)
+    block = region_block_size(h, w)  # area <= 0.1% of image
+    for t in range(len(frames)):
+        np.save(os.path.join(out_dir, f"depth_{t:03d}.npy"), depth[t])
+        reg = region_depth(depth[t], block)
+        np.savez_compressed(
+            os.path.join(out_dir, f"regions_{t:03d}.npz"),
+            depth=reg, block_size=block,
+            note="depth[i,j] = mean pixel-unit depth of block "
+                 "rows [i*b,(i+1)*b), cols [j*b,(j+1)*b)",
+        )
+        vis = cv2.applyColorMap(
+            (255 * (1 - (depth[t] - depth.min()) / (depth.max() - depth.min()))).astype(np.uint8),
+            cv2.COLORMAP_TURBO,
+        )
+        cv2.imwrite(os.path.join(out_dir, f"depth_{t:03d}_vis.png"), vis)
+
+    meta = {
+        "model": model_info,
+        "device": device,
+        "n_frames": len(frames),
+        "frame_size": [w, h],
+        "intrinsics": intr.to_dict(),
+        "intrinsics_note": intr_note,
+        "depth_units": "pixels (see depth_pipeline.py docstring)",
+        "region_block_px": block,
+        "region_block_area_fraction": block * block / (h * w),
+        **norm_meta,
+    }
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"[depth] wrote per-pixel depth + region files (block={block}px, "
+          f"{block*block/(h*w)*100:.3f}% of image) + meta.json -> {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
